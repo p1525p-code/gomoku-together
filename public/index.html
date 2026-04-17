@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>다함께 오목 (선생님 vs 학생들)</title>
+    <style>
+        body { text-align: center; font-family: sans-serif; background-color: #f4f4f9; }
+        #info { margin: 15px; font-size: 1.5em; font-weight: bold; height: 30px; }
+        
+        #control-panel { background-color: #eee; padding: 10px; margin-bottom: 10px; display: inline-block; border-radius: 8px; }
+        
+        /* 💡 추가된 설정 패널 디자인 */
+        #settings-panel {
+            display: none; /* 학생들에게는 보이지 않도록 기본적으로 숨김 */
+            background-color: #dcdde1; padding: 8px 15px; margin-top: 10px; 
+            border-radius: 6px; font-size: 0.9em;
+        }
+        #settings-panel input { width: 50px; text-align: center; font-weight: bold; }
+        #apply-settings-btn { padding: 4px 8px; margin-left: 5px; cursor: pointer; background-color: #0097e6; color: white; border: none; border-radius: 4px; }
+        #apply-settings-btn:hover { background-color: #00a8ff; }
+
+        #reset-btn { display: none; margin-left: 15px; padding: 5px 10px; background-color: #ff4757; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; }
+        #reset-btn:hover { background-color: #ff6b81; }
+        #stop-vote-btn { display: none; margin-left: 10px; padding: 5px 10px; background-color: #ff9f43; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; }
+        #stop-vote-btn:hover { background-color: #ffb142; }
+
+        #board { display: inline-grid; grid-template-columns: repeat(15, 30px); grid-template-rows: repeat(15, 30px); background-color: #dcba88; padding: 15px; border: 2px solid #5c4033; box-shadow: 4px 4px 12px rgba(0,0,0,0.4); margin-top: 10px; }
+        .cell { width: 30px; height: 30px; position: relative; cursor: pointer; }
+        .cell::before { content: ''; position: absolute; top: 50%; left: 0; width: 100%; height: 1px; background-color: #333; z-index: 1; }
+        .cell::after { content: ''; position: absolute; top: 0; left: 50%; height: 100%; width: 1px; background-color: #333; z-index: 1; }
+        .top-edge::after { top: 50%; height: 50%; }
+        .bottom-edge::after { height: 50%; }       
+        .left-edge::before { left: 50%; width: 50%; } 
+        .right-edge::before { width: 50%; }          
+        .black, .white { width: 26px; height: 26px; border-radius: 50%; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 2; box-shadow: 2px 2px 4px rgba(0,0,0,0.5); }
+        .black { background-color: #111; }
+        .white { background-color: #f9f9f9; }
+        .vote-count { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: red; font-weight: bold; font-size: 14px; z-index: 3; pointer-events: none; background-color: rgba(255, 255, 255, 0.8); border-radius: 4px; padding: 1px 4px; }
+        
+        .win-text { color: #2ed573 !important; animation: bounce 1s infinite; }
+        @keyframes bounce { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-10px); } }
+    </style>
+</head>
+<body>
+    <h1>다함께 오목 게임</h1>
+    
+    <div id="control-panel">
+        <div>
+            현재 역할: <strong id="role-display">확인 중...</strong>
+            <button id="reset-btn">🔄 게임 초기화</button>
+            <button id="stop-vote-btn">🛑 투표 조기 종료</button>
+	    <button id="bgm-btn">🎵 배경음 켜기</button>
+        </div>
+        
+        <div id="settings-panel">
+            <label for="vote-time-input">⏱ 투표 시간 설정:</label>
+            <input type="number" id="vote-time-input" value="15" min="3" max="120"> 초
+            <button id="apply-settings-btn">적용하기</button>
+        </div>
+    </div>
+
+    <div id="info">접속 중...</div>
+    <div id="board"></div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+       // 💡 [변경됨] 주소창에서 admin= 뒤에 있는 비밀번호를 가져와서 서버로 보냅니다.
+        const urlParams = new URLSearchParams(window.location.search);
+        const adminKey = urlParams.get('admin');
+      // --- 1. 사운드 객체 초기화 --
+      // Audio 객체를 생성합니다. 파일 경로가 정확해야 합니다.
+        const bgm = new Audio('/sounds/bgm.mp3');
+            bgm.loop = true; // 배경음악은 무한 반복되도록 설정합니다.
+            bgm.volume = 0.4; // 배경음악 볼륨을 약간 낮춥니다 (0.0 ~ 1.0).
+        const stoneSound = new Audio('/sounds/stone.mp3');
+        const turnSound = new Audio('/sounds/turn.mp3');
+
+        let isBgmPlaying = false;
+        // --- 2. 배경음 제어 함수 (브라우저 정책 대응) ---
+	const bgmBtn = document.getElementById('bgm-btn');
+	bgmBtn.addEventListener('click', () => {
+    		if (!isBgmPlaying) {
+        	// 브라우저의 오디오 잠금을 해제하며 재생을 시작합니다.
+        	bgm.play().then(() => {
+            		bgmBtn.innerText = "🔇 배경음 끄기";
+            		isBgmPlaying = true;
+        	}).catch(error => {
+            		console.error("재생 실패:", error);
+            		alert("파일이 없거나 브라우저 설정에 의해 차단되었습니다.");
+        	});
+    	} else {
+        	bgm.pause();
+        	bgmBtn.innerText = "🎵 배경음 켜기";
+        	isBgmPlaying = false;
+    	}
+	});
+
+        const socket = io({
+            query: { admin: adminKey }
+        });
+        
+        const boardDiv = document.getElementById('board');
+        const infoDiv = document.getElementById('info');
+        const roleDisplay = document.getElementById('role-display');
+        const resetBtn = document.getElementById('reset-btn');
+        const stopVoteBtn = document.getElementById('stop-vote-btn');
+        const settingsPanel = document.getElementById('settings-panel');
+        const voteTimeInput = document.getElementById('vote-time-input');
+        const applySettingsBtn = document.getElementById('apply-settings-btn');
+        
+        let currentRole = null;
+        let isMyTurn = false;
+        let isGameOver = false; 
+
+        socket.on('roleConfirmed', (role) => {
+            currentRole = role;
+            if (role === 'teacher') {
+                roleDisplay.innerText = "선생님 (자동 로그인)";
+                roleDisplay.style.color = "red";
+                resetBtn.style.display = "inline-block"; 
+                settingsPanel.style.display = "block"; // 💡 선생님이면 설정 패널 표시
+            } else {
+                roleDisplay.innerText = "학생 (자동 로그인)";
+                roleDisplay.style.color = "blue";
+                resetBtn.style.display = "none"; 
+                stopVoteBtn.style.display = "none"; 
+                settingsPanel.style.display = "none"; // 💡 학생이면 숨김
+            }
+            updateStatusText();
+        });
+
+        // 💡 설정 적용 버튼 클릭 이벤트
+        applySettingsBtn.addEventListener('click', () => {
+            const newTime = parseInt(voteTimeInput.value);
+            if (newTime >= 3 && newTime <= 120) {
+                socket.emit('updateSettings', { voteTime: newTime });
+            } else {
+                alert("투표 시간은 3초에서 120초 사이로 설정해주세요.");
+            }
+        });
+
+        // 💡 서버에서 설정이 반영되었다는 응답이 오면 실행됨
+        socket.on('settingsUpdated', (data) => {
+            voteTimeInput.value = data.voteTime;
+            alert(`투표 시간이 ${data.voteTime}초로 성공적으로 설정되었습니다!\n(다음 투표 턴부터 적용됩니다)`);
+        });
+
+        resetBtn.addEventListener('click', () => {
+            if (confirm("정말 바둑판을 싹 비우고 게임을 처음부터 다시 시작할까요?")) {
+                socket.emit('resetGame');
+            }
+        });
+
+        stopVoteBtn.addEventListener('click', () => {
+            socket.emit('forceStopVote');
+        });
+
+        for (let r = 0; r < 15; r++) {
+            for (let c = 0; c < 15; c++) {
+                const cell = document.createElement('div');
+                cell.className = 'cell';
+                if (r === 0) cell.classList.add('top-edge');
+                if (r === 14) cell.classList.add('bottom-edge');
+                if (c === 0) cell.classList.add('left-edge');
+                if (c === 14) cell.classList.add('right-edge');
+                cell.dataset.row = r;
+                cell.dataset.col = c;
+                cell.addEventListener('click', () => handleCellClick(r, c));
+                boardDiv.appendChild(cell);
+            }
+        }
+
+        function handleCellClick(row, col) {
+            if (isGameOver) return; 
+
+            if (currentRole === 'teacher' && isMyTurn) {
+                socket.emit('teacherMove', { row, col });
+            } else if (currentRole === 'student' && !isMyTurn) {
+                socket.emit('studentVote', { row, col });
+            }
+        }
+
+        socket.on('updateBoard', (board) => {
+		stoneSound.currentTime = 0; 
+    		stoneSound.play().catch(e => {
+        		console.log("소리 재생을 위해 먼저 화면이나 배경음 버튼을 클릭해주세요.");
+    		});
+            const cells = document.querySelectorAll('.cell');
+            cells.forEach(cell => {
+                const r = parseInt(cell.dataset.row);
+                const c = parseInt(cell.dataset.col);
+                cell.innerHTML = ''; 
+                cell.classList.remove('black', 'white');
+                if (board[r][c] === 1) {
+                    const stone = document.createElement('div');
+                    stone.className = 'black';
+                    cell.appendChild(stone);
+                } else if (board[r][c] === 2) {
+                    const stone = document.createElement('div');
+                    stone.className = 'white';
+                    cell.appendChild(stone);
+                }
+            });
+        });
+
+        socket.on('turnChange', (turn) => {
+            if (isGameOver) return;
+            isMyTurn = (turn === 1);
+	    const isTeacherTurn = (turn === 1);
+   	    const isMyActualTurn = (isTeacherTurn && currentRole === 'teacher') || (!isTeacherTurn && currentRole === 'student');
+
+   	    if (isMyActualTurn) {
+       		turnSound.currentTime = 0;
+        	turnSound.play().catch(e => {});
+	   }
+            updateStatusText();
+        });
+
+        socket.on('updateVotes', (votes) => {
+            document.querySelectorAll('.vote-count').forEach(el => el.remove());
+            for (const [key, count] of Object.entries(votes)) {
+                const [r, c] = key.split(',');
+                const cell = document.querySelector(`.cell[data-row="${r}"][data-col="${c}"]`);
+                if (cell && !cell.querySelector('.black') && !cell.querySelector('.white')) {
+                    const span = document.createElement('span');
+                    span.className = 'vote-count';
+                    span.innerText = count;
+                    cell.appendChild(span);
+                }
+            }
+        });
+
+        socket.on('timerUpdate', (time) => {
+            if (time === '' || isGameOver) return;
+            if (currentRole === 'student' && !isMyTurn) {
+                infoDiv.innerText = `학생 턴입니다! 투표 남은 시간: ${time}초`;
+            } else if (currentRole === 'teacher' && !isMyTurn) {
+                infoDiv.innerText = `학생들이 투표 중입니다... (${time}초 남음)`;
+            }
+        });
+
+        socket.on('gameOver', (winner) => {
+            isGameOver = true;
+            stopVoteBtn.style.display = "none"; 
+            infoDiv.classList.add('win-text'); 
+            
+            if (winner === 'teacher') {
+                infoDiv.innerText = "🎉 선생님 승리! (검은 돌 5개 완성) 🎉";
+            } else {
+                infoDiv.innerText = "🎉 학생들 승리! (흰 돌 5개 완성) 🎉";
+            }
+        });
+
+        socket.on('gameReset', () => {
+            isGameOver = false;
+            infoDiv.classList.remove('win-text');
+        });
+       // 💡 [추가됨] 서버에서 렌주룰 금수 경고가 오면 팝업창을 띄웁니다.
+        socket.on('invalidMove', (message) => {
+            alert(message);
+        });
+
+        function updateStatusText() {
+            if (!currentRole || isGameOver) return;
+            
+            if (isMyTurn) {
+                if (currentRole === 'teacher') {
+                    infoDiv.innerText = "선생님 턴입니다. 돌을 놓아주세요.";
+                    stopVoteBtn.style.display = "none"; 
+                } else {
+                    infoDiv.innerText = "선생님 턴입니다. 대기 중...";
+                }
+            } else {
+                if (currentRole === 'teacher') {
+                    infoDiv.innerText = "학생들이 투표 중입니다...";
+                    stopVoteBtn.style.display = "inline-block"; 
+                } else {
+                    infoDiv.innerText = "학생 턴입니다! 원하는 곳을 클릭하여 투표하세요.";
+                }
+            }
+        }
+    </script>
+</body>
+</html>
