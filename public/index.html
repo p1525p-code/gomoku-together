@@ -5,13 +5,14 @@
     <title>다함께 오목 (선생님 vs 학생들)</title>
     <style>
         body { text-align: center; font-family: sans-serif; background-color: #f4f4f9; }
+        h1 { margin-bottom: 5px; }
+        .room-title { font-size: 0.6em; color: #555; background: #dfe4ea; padding: 5px 10px; border-radius: 20px; vertical-align: middle; }
         #info { margin: 15px; font-size: 1.5em; font-weight: bold; height: 30px; }
         
         #control-panel { background-color: #eee; padding: 10px; margin-bottom: 10px; display: inline-block; border-radius: 8px; }
         
-        /* 💡 추가된 설정 패널 디자인 */
         #settings-panel {
-            display: none; /* 학생들에게는 보이지 않도록 기본적으로 숨김 */
+            display: none; 
             background-color: #dcdde1; padding: 8px 15px; margin-top: 10px; 
             border-radius: 6px; font-size: 0.9em;
         }
@@ -42,14 +43,14 @@
     </style>
 </head>
 <body>
-    <h1>다함께 오목 게임</h1>
+    <h1>다함께 오목 게임 <span class="room-title" id="room-name-display">기본 대기실</span></h1>
     
     <div id="control-panel">
         <div>
             현재 역할: <strong id="role-display">확인 중...</strong>
             <button id="reset-btn">🔄 게임 초기화</button>
             <button id="stop-vote-btn">🛑 투표 조기 종료</button>
-	    <button id="bgm-btn">🎵 배경음 켜기</button>
+            <button id="bgm-btn">🎵 배경음 켜기</button>
         </div>
         
         <div id="settings-panel">
@@ -64,39 +65,46 @@
 
     <script src="/socket.io/socket.io.js"></script>
     <script>
-       // 💡 [변경됨] 주소창에서 admin= 뒤에 있는 비밀번호를 가져와서 서버로 보냅니다.
+        // 💡 [변경됨] 주소창에서 room(방 이름)과 admin(비밀번호)을 모두 가져옵니다.
         const urlParams = new URLSearchParams(window.location.search);
         const adminKey = urlParams.get('admin');
-      // --- 1. 사운드 객체 초기화 --
-      // Audio 객체를 생성합니다. 파일 경로가 정확해야 합니다.
+        const roomName = urlParams.get('room') || 'lobby'; // 파라미터가 없으면 lobby 방으로 배정
+
+        // 화면 상단에 접속한 방 이름 표시
+        document.getElementById('room-name-display').innerText = roomName + " 방";
+
+        // 사운드 객체 초기화
         const bgm = new Audio('/sounds/bgm.mp3');
-            bgm.loop = true; // 배경음악은 무한 반복되도록 설정합니다.
-            bgm.volume = 0.4; // 배경음악 볼륨을 약간 낮춥니다 (0.0 ~ 1.0).
+        bgm.loop = true; 
+        bgm.volume = 0.4; 
         const stoneSound = new Audio('/sounds/stone.mp3');
         const turnSound = new Audio('/sounds/turn.mp3');
 
         let isBgmPlaying = false;
-        // --- 2. 배경음 제어 함수 (브라우저 정책 대응) ---
-	const bgmBtn = document.getElementById('bgm-btn');
-	bgmBtn.addEventListener('click', () => {
-    		if (!isBgmPlaying) {
-        	// 브라우저의 오디오 잠금을 해제하며 재생을 시작합니다.
-        	bgm.play().then(() => {
-            		bgmBtn.innerText = "🔇 배경음 끄기";
-            		isBgmPlaying = true;
-        	}).catch(error => {
-            		console.error("재생 실패:", error);
-            		alert("파일이 없거나 브라우저 설정에 의해 차단되었습니다.");
-        	});
-    	} else {
-        	bgm.pause();
-        	bgmBtn.innerText = "🎵 배경음 켜기";
-        	isBgmPlaying = false;
-    	}
-	});
+        
+        const bgmBtn = document.getElementById('bgm-btn');
+        bgmBtn.addEventListener('click', () => {
+            if (!isBgmPlaying) {
+                bgm.play().then(() => {
+                    bgmBtn.innerText = "🔇 배경음 끄기";
+                    isBgmPlaying = true;
+                }).catch(error => {
+                    console.error("재생 실패:", error);
+                    alert("파일이 없거나 브라우저 설정에 의해 차단되었습니다.");
+                });
+            } else {
+                bgm.pause();
+                bgmBtn.innerText = "🎵 배경음 켜기";
+                isBgmPlaying = false;
+            }
+        });
 
+        // 💡 [변경됨] 서버에 연결할 때 접속할 방(room) 데이터도 함께 보냅니다.
         const socket = io({
-            query: { admin: adminKey }
+            query: { 
+                admin: adminKey,
+                room: roomName
+            }
         });
         
         const boardDiv = document.getElementById('board');
@@ -118,18 +126,17 @@
                 roleDisplay.innerText = "선생님 (자동 로그인)";
                 roleDisplay.style.color = "red";
                 resetBtn.style.display = "inline-block"; 
-                settingsPanel.style.display = "block"; // 💡 선생님이면 설정 패널 표시
+                settingsPanel.style.display = "block"; 
             } else {
                 roleDisplay.innerText = "학생 (자동 로그인)";
                 roleDisplay.style.color = "blue";
                 resetBtn.style.display = "none"; 
                 stopVoteBtn.style.display = "none"; 
-                settingsPanel.style.display = "none"; // 💡 학생이면 숨김
+                settingsPanel.style.display = "none"; 
             }
             updateStatusText();
         });
 
-        // 💡 설정 적용 버튼 클릭 이벤트
         applySettingsBtn.addEventListener('click', () => {
             const newTime = parseInt(voteTimeInput.value);
             if (newTime >= 3 && newTime <= 120) {
@@ -139,7 +146,6 @@
             }
         });
 
-        // 💡 서버에서 설정이 반영되었다는 응답이 오면 실행됨
         socket.on('settingsUpdated', (data) => {
             voteTimeInput.value = data.voteTime;
             alert(`투표 시간이 ${data.voteTime}초로 성공적으로 설정되었습니다!\n(다음 투표 턴부터 적용됩니다)`);
@@ -181,10 +187,9 @@
         }
 
         socket.on('updateBoard', (board) => {
-		stoneSound.currentTime = 0; 
-    		stoneSound.play().catch(e => {
-        		console.log("소리 재생을 위해 먼저 화면이나 배경음 버튼을 클릭해주세요.");
-    		});
+            stoneSound.currentTime = 0; 
+            stoneSound.play().catch(e => {});
+
             const cells = document.querySelectorAll('.cell');
             cells.forEach(cell => {
                 const r = parseInt(cell.dataset.row);
@@ -206,13 +211,13 @@
         socket.on('turnChange', (turn) => {
             if (isGameOver) return;
             isMyTurn = (turn === 1);
-	    const isTeacherTurn = (turn === 1);
-   	    const isMyActualTurn = (isTeacherTurn && currentRole === 'teacher') || (!isTeacherTurn && currentRole === 'student');
+            const isTeacherTurn = (turn === 1);
+            const isMyActualTurn = (isTeacherTurn && currentRole === 'teacher') || (!isTeacherTurn && currentRole === 'student');
 
-   	    if (isMyActualTurn) {
-       		turnSound.currentTime = 0;
-        	turnSound.play().catch(e => {});
-	   }
+            if (isMyActualTurn) {
+                turnSound.currentTime = 0;
+                turnSound.play().catch(e => {});
+            }
             updateStatusText();
         });
 
@@ -255,7 +260,7 @@
             isGameOver = false;
             infoDiv.classList.remove('win-text');
         });
-       // 💡 [추가됨] 서버에서 렌주룰 금수 경고가 오면 팝업창을 띄웁니다.
+        
         socket.on('invalidMove', (message) => {
             alert(message);
         });
