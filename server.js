@@ -8,20 +8,27 @@ const io = new Server(server);
 
 app.use(express.static('public'));
 
-let teacherSocketId = null;
-
 const BOARD_SIZE = 15;
-let board = Array(BOARD_SIZE).fill().map(() => Array(BOARD_SIZE).fill(0)); 
-let currentTurn = 1; 
-let studentVotes = {}; 
-let voteTimer = null;
-let isGameOver = false; 
+const ADMIN_PASSWORD = "7777"; 
 
-// 💡 [변경됨] 고정되었던 시간을 변경 가능한 변수로 바꿉니다.
-let currentVoteTimeLimit = 15; 
+// 💡 [변경됨] 모든 방의 게임 상태를 저장하는 객체
+const rooms = {}; 
 
-// 💡 [변경됨] 백돌(학생)은 5목 이상 승리, 흑돌(선생)은 정확히 5목이어야 승리
-function checkWin(r, c, player) {
+// 💡 [추가됨] 새로운 방을 위한 초기 게임 상태를 만드는 함수
+function createNewGame() {
+    return {
+        board: Array(BOARD_SIZE).fill().map(() => Array(BOARD_SIZE).fill(0)),
+        currentTurn: 1, 
+        studentVotes: {}, 
+        voteTimer: null,
+        isGameOver: false,
+        currentVoteTimeLimit: 15,
+        teacherSocketId: null
+    };
+}
+
+// 💡 [변경됨] board를 매개변수로 받도록 수정
+function checkWin(board, r, c, player) {
     const directions = [
         [[0, 1], [0, -1]], [[1, 0], [-1, 0]], [[1, 1], [-1, -1]], [[1, -1], [-1, 1]]
     ];
@@ -34,215 +41,215 @@ function checkWin(r, c, player) {
                 count++; nr += d[0]; nc += d[1];
             }
         }
-        if (player === 2 && count >= 5) return true; // 백돌은 5목 이상이면 무조건 승리
-        if (player === 1 && count === 5) return true; // 흑돌은 정확히 5목일 때만 승리
+        if (player === 2 && count >= 5) return true; 
+        if (player === 1 && count === 5) return true; 
     }
     return false;
 }
 
-// 💡 [추가됨] 흑돌(선생님)의 렌주룰 금수(3-3, 4-4, 6목)를 판별하는 인공지능 함수
+// 렌주룰 금수 판별 (기존과 동일)
 function checkRenjuFoul(board, r, c) {
-    board[r][c] = 1; // 임시로 돌을 놓아봄
+    board[r][c] = 1; 
     const dirs = [ [0,1], [1,0], [1,1], [1,-1] ];
     let threeCount = 0; let fourCount = 0; let isFiveWin = false;
 
     for (let i = 0; i < 4; i++) {
         let [dr, dc] = dirs[i];
         let line = "";
-        // 착수 지점 기준 앞뒤 5칸씩 총 11칸의 상태를 문자열로 만듦 (O:흑, X:백, .:빈칸)
         for (let step = -5; step <= 5; step++) {
             let nr = r + dr * step; let nc = c + dc * step;
-            if (nr < 0 || nr >= BOARD_SIZE || nc < 0 || nc >= BOARD_SIZE) line += "X"; // 벽은 백돌과 같은 취급
+            if (nr < 0 || nr >= BOARD_SIZE || nc < 0 || nc >= BOARD_SIZE) line += "X"; 
             else if (board[nr][nc] === 1) line += "O";
             else if (board[nr][nc] === 2) line += "X";
             else line += ".";
         }
 
-        if (line.includes("OOOOOO")) { board[r][c] = 0; return "장목 (6목 이상)"; } // 6목 금지
-        if (line.includes("OOOOO")) { isFiveWin = true; continue; } // 5목 완성이면 승리이므로 예외
+        if (line.includes("OOOOOO")) { board[r][c] = 0; return "장목 (6목 이상)"; } 
+        if (line.includes("OOOOO")) { isFiveWin = true; continue; } 
 
-        // 4목 패턴 (돌 하나만 더 놓으면 5가 되는 형태)
         const fourRegex = /(?:\.OOOOX|XOOOO\.|\.OOOO\.|O\.OOO|OOO\.O|OO\.OO)/;
         if (fourRegex.test(line)) fourCount++;
 
-        // 3목 패턴 (양쪽이 열려있어서 다음 턴에 4를 두 개 만들 수 있는 형태)
         const threeRegex = /(?:\.\.OOO\.|\.OOO\.\.|\.O\.OO\.|\.OO\.O\.)/;
         if (threeRegex.test(line)) threeCount++;
     }
 
-    board[r][c] = 0; // 원상복구
+    board[r][c] = 0; 
 
-    if (isFiveWin) return null; // 5목 완성이 우선순위 (금수 아님)
+    if (isFiveWin) return null; 
     if (fourCount >= 2) return "쌍사 (4-4)";
     if (threeCount >= 2) return "쌍삼 (3-3)";
 
-    return null; // 금수가 아님 (정상 착수 가능)
+    return null; 
 }
-function calculateCurrentVotes() {
+
+// 💡 [변경됨] 특정 방의 투표 수를 계산
+function calculateCurrentVotes(roomName) {
+    const game = rooms[roomName];
     let voteCounts = {};
-    for (const position of Object.values(studentVotes)) {
+    for (const position of Object.values(game.studentVotes)) {
         voteCounts[position] = (voteCounts[position] || 0) + 1;
     }
     return voteCounts;
 }
 
-// 💡 [추가] 선생님 전용 비밀번호를 마음대로 설정하세요!
-const ADMIN_PASSWORD = "7777"; 
-
 io.on('connection', (socket) => {
-    // 💡 클라이언트가 접속할 때 보낸 비밀번호(admin) 값을 확인합니다.
+    // 💡 [추가됨] 접속 시 방 이름(room)을 가져옴 (없으면 'lobby')
+    const roomName = socket.handshake.query.room || 'lobby';
     const clientPassword = socket.handshake.query.admin;
+
+    // 해당 방에 소켓을 조인시킵니다.
+    socket.join(roomName);
+
+    // 방이 처음 만들어졌다면 초기 상태 생성
+    if (!rooms[roomName]) {
+        rooms[roomName] = createNewGame();
+    }
     
-    // 비밀번호가 일치하면 선생님, 아니면 학생으로 배정
+    // 현재 조인한 방의 게임 상태를 변수에 할당
+    const game = rooms[roomName];
+
     if (clientPassword === ADMIN_PASSWORD) {
-        teacherSocketId = socket.id;
-        console.log('✅ 선생님 접속 완료:', socket.id);
+        game.teacherSocketId = socket.id;
+        console.log(`[${roomName}] ✅ 선생님 접속 완료: ${socket.id}`);
         socket.emit('roleConfirmed', 'teacher'); 
-        socket.emit('settingsUpdated', { voteTime: currentVoteTimeLimit });
+        socket.emit('settingsUpdated', { voteTime: game.currentVoteTimeLimit });
     } else {
-        console.log('🧑‍🎓 학생 접속 완료:', socket.id);
+        console.log(`[${roomName}] 🧑‍🎓 학생 접속 완료: ${socket.id}`);
         socket.emit('roleConfirmed', 'student'); 
     }
 
-    socket.emit('updateBoard', board);
-    if (isGameOver) {
-        socket.emit('gameOver', currentTurn === 2 ? 'teacher' : 'student'); 
+    socket.emit('updateBoard', game.board);
+    if (game.isGameOver) {
+        socket.emit('gameOver', game.currentTurn === 2 ? 'teacher' : 'student'); 
     } else {
-        socket.emit('turnChange', currentTurn);
+        socket.emit('turnChange', game.currentTurn);
     }
 
-    // ...(이 아래 코드(socket.on...)들은 기존과 동일하게 유지합니다)...
-    socket.emit('updateBoard', board);
-    if (isGameOver) {
-        socket.emit('gameOver', currentTurn === 2 ? 'teacher' : 'student'); 
-    } else {
-        socket.emit('turnChange', currentTurn);
-    }
-
-    // 💡 [추가됨] 선생님의 설정 변경 요청 처리
     socket.on('updateSettings', (data) => {
-        if (socket.id !== teacherSocketId) return; 
+        if (socket.id !== game.teacherSocketId) return; 
 
         if (data.voteTime) {
-            currentVoteTimeLimit = data.voteTime;
-            console.log(`⚙️ 설정 변경됨 - 새로운 투표 시간: ${currentVoteTimeLimit}초`);
-            // 선생님 화면에 설정이 잘 반영되었다고 알려줍니다.
-            socket.emit('settingsUpdated', { voteTime: currentVoteTimeLimit });
+            game.currentVoteTimeLimit = data.voteTime;
+            console.log(`[${roomName}] ⚙️ 설정 변경 - 투표 시간: ${game.currentVoteTimeLimit}초`);
+            socket.emit('settingsUpdated', { voteTime: game.currentVoteTimeLimit });
         }
     });
 
-        socket.on('teacherMove', (data) => {
-        if (socket.id !== teacherSocketId || isGameOver) return; 
+    socket.on('teacherMove', (data) => {
+        if (socket.id !== game.teacherSocketId || game.isGameOver) return; 
 
         const { row, col } = data;
-        if (currentTurn === 1 && board[row][col] === 0) {
+        if (game.currentTurn === 1 && game.board[row][col] === 0) {
             
-            // 💡 [추가됨] 렌주룰 검사! 금수라면 착수를 취소하고 경고를 보냄
-            const foulReason = checkRenjuFoul(board, row, col);
+            const foulReason = checkRenjuFoul(game.board, row, col);
             if (foulReason) {
                 socket.emit('invalidMove', `🚨 렌주룰 금수입니다!\n사유: ${foulReason}\n다른 곳에 돌을 놓아주세요.`);
-                return; // 턴을 넘기지 않고 함수 종료
+                return; 
             }
 
-            board[row][col] = 1; 
-            io.emit('updateBoard', board);
+            game.board[row][col] = 1; 
+            // 💡 [변경됨] io.emit 대신 io.to(roomName).emit 사용 (해당 방에만 전송)
+            io.to(roomName).emit('updateBoard', game.board);
 
-            if (checkWin(row, col, 1)) {
-                isGameOver = true;
-                io.emit('gameOver', 'teacher');
-                console.log('🎉 선생님 승리!');
+            if (checkWin(game.board, row, col, 1)) {
+                game.isGameOver = true;
+                io.to(roomName).emit('gameOver', 'teacher');
+                console.log(`[${roomName}] 🎉 선생님 승리!`);
                 return;
             }
 
-            currentTurn = 2; 
-            io.emit('turnChange', currentTurn);
-            startStudentVote(); 
+            game.currentTurn = 2; 
+            io.to(roomName).emit('turnChange', game.currentTurn);
+            startStudentVote(roomName); 
         }
     });
 
     socket.on('studentVote', (data) => {
-        if (socket.id === teacherSocketId || isGameOver) return; 
+        if (socket.id === game.teacherSocketId || game.isGameOver) return; 
 
-        if (currentTurn === 2) {
+        if (game.currentTurn === 2) {
             const { row, col } = data;
             const key = `${row},${col}`;
             
-            if (board[row][col] === 0) {
-                studentVotes[socket.id] = key;
-                io.emit('updateVotes', calculateCurrentVotes()); 
+            if (game.board[row][col] === 0) {
+                game.studentVotes[socket.id] = key;
+                io.to(roomName).emit('updateVotes', calculateCurrentVotes(roomName)); 
             }
         }
     });
 
     socket.on('forceStopVote', () => {
-        if (socket.id !== teacherSocketId || isGameOver) return; 
+        if (socket.id !== game.teacherSocketId || game.isGameOver) return; 
 
-        if (currentTurn === 2 && voteTimer) {
-            console.log('🛑 선생님이 투표를 조기 종료했습니다.');
-            clearInterval(voteTimer); 
-            voteTimer = null;
-            processVoteResult(); 
+        if (game.currentTurn === 2 && game.voteTimer) {
+            console.log(`[${roomName}] 🛑 선생님 조기 종료`);
+            clearInterval(game.voteTimer); 
+            game.voteTimer = null;
+            processVoteResult(roomName); 
         }
     });
 
     socket.on('resetGame', () => {
-        if (socket.id !== teacherSocketId) return; 
+        if (socket.id !== game.teacherSocketId) return; 
 
-        console.log('🔄 게임이 초기화되었습니다.');
+        console.log(`[${roomName}] 🔄 게임 초기화`);
         
-        board = Array(BOARD_SIZE).fill().map(() => Array(BOARD_SIZE).fill(0));
-        currentTurn = 1;
-        studentVotes = {}; 
-        isGameOver = false; 
+        game.board = Array(BOARD_SIZE).fill().map(() => Array(BOARD_SIZE).fill(0));
+        game.currentTurn = 1;
+        game.studentVotes = {}; 
+        game.isGameOver = false; 
         
-        if (voteTimer) {
-            clearInterval(voteTimer);
-            voteTimer = null;
+        if (game.voteTimer) {
+            clearInterval(game.voteTimer);
+            game.voteTimer = null;
         }
 
-        io.emit('updateBoard', board);
-        io.emit('updateVotes', {});
-        io.emit('gameReset'); 
-        io.emit('turnChange', currentTurn);
-        io.emit('timerUpdate', ''); 
+        io.to(roomName).emit('updateBoard', game.board);
+        io.to(roomName).emit('updateVotes', {});
+        io.to(roomName).emit('gameReset'); 
+        io.to(roomName).emit('turnChange', game.currentTurn);
+        io.to(roomName).emit('timerUpdate', ''); 
     });
 
     socket.on('disconnect', () => {
-        if (socket.id === teacherSocketId) {
-            teacherSocketId = null;
+        if (socket.id === game.teacherSocketId) {
+            game.teacherSocketId = null;
         } else {
-            if (studentVotes[socket.id]) {
-                delete studentVotes[socket.id];
-                if (!isGameOver) io.emit('updateVotes', calculateCurrentVotes());
+            if (game.studentVotes[socket.id]) {
+                delete game.studentVotes[socket.id];
+                if (!game.isGameOver) io.to(roomName).emit('updateVotes', calculateCurrentVotes(roomName));
             }
         }
     });
 });
 
-function startStudentVote() {
-    studentVotes = {}; 
-    io.emit('updateVotes', {});
+// 💡 [변경됨] 룸 이름을 받아서 해당 룸의 게임을 제어함
+function startStudentVote(roomName) {
+    const game = rooms[roomName];
+    game.studentVotes = {}; 
+    io.to(roomName).emit('updateVotes', {});
     
-    // 💡 투표가 시작될 때, 현재 설정된 시간(currentVoteTimeLimit)을 사용합니다.
-    let timeLeft = currentVoteTimeLimit;
-    io.emit('timerUpdate', timeLeft);
+    let timeLeft = game.currentVoteTimeLimit;
+    io.to(roomName).emit('timerUpdate', timeLeft);
 
-    voteTimer = setInterval(() => {
+    game.voteTimer = setInterval(() => {
         timeLeft--;
-        io.emit('timerUpdate', timeLeft);
+        io.to(roomName).emit('timerUpdate', timeLeft);
 
         if (timeLeft <= 0) {
-            clearInterval(voteTimer);
-            processVoteResult(); 
+            clearInterval(game.voteTimer);
+            processVoteResult(roomName); 
         }
     }, 1000);
 }
 
-function processVoteResult() {
+function processVoteResult(roomName) {
+    const game = rooms[roomName];
     let maxVotes = 0;
     let bestMove = null;
     
-    const finalVotes = calculateCurrentVotes();
+    const finalVotes = calculateCurrentVotes(roomName);
 
     for (const [key, count] of Object.entries(finalVotes)) {
         if (count > maxVotes) {
@@ -253,21 +260,21 @@ function processVoteResult() {
 
     if (bestMove) {
         const [row, col] = bestMove.split(',').map(Number);
-        board[row][col] = 2; 
-        io.emit('updateBoard', board);
+        game.board[row][col] = 2; 
+        io.to(roomName).emit('updateBoard', game.board);
 
-        if (checkWin(row, col, 2)) {
-            isGameOver = true;
-            io.emit('gameOver', 'student');
-            console.log('🎉 학생들 승리!');
-            io.emit('updateVotes', {});
+        if (checkWin(game.board, row, col, 2)) {
+            game.isGameOver = true;
+            io.to(roomName).emit('gameOver', 'student');
+            console.log(`[${roomName}] 🎉 학생들 승리!`);
+            io.to(roomName).emit('updateVotes', {});
             return;
         }
     }
 
-    currentTurn = 1; 
-    io.emit('turnChange', currentTurn);
-    io.emit('updateVotes', {}); 
+    game.currentTurn = 1; 
+    io.to(roomName).emit('turnChange', game.currentTurn);
+    io.to(roomName).emit('updateVotes', {}); 
 }
 
 server.listen(3000, () => {
